@@ -53,3 +53,16 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# STM32 & IDE Specific
+# 拦截编译输出文件夹
+Debug/
+Release/
+
+# 拦截 IDE 自动生成的临时配置缓存
+.mxproject
+.vscode/
+
+# 拦截 J-Link/ST-Link 调试临时文件
+*.launch
+*.jlink
