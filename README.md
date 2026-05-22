@@ -1,2 +1,74 @@
 # STM32_FreeRTOS_Exercise
-基于 STM32 与 FreeRTOS 的全向移动机器人底层架构 (麦轮逆解算 + 位置式 PID 闭环)
+基于 STM32 与 FreeRTOS 的全向移动机器人底层架构 (麦轮逆解算 + 速度 PID 闭环)
+小车实际操作演示 https://www.bilibili.com/video/BV1DjLp69EFb?vd_source=a87c30d6df53430ea871d43b21023a6d
+
+项目简介：
+本项目是一个用于全向移动机器人的底层控制固件。系统基于 STM32F4 平台开发，采用 FreeRTOS 进行多任务调度，实现了对 PS2 遥控器数据的实时解析、麦克纳姆轮运动学逆解以及四轮独立增量式 PID 闭环控制。
+
+硬件需求
+1.stm32f407zgt6核心板*1     2. 带霍尔编码器的减速电机jga-370 *4  3.ab型麦轮各 *2
+4.lm2596可调降压模块 *1     5.ps2手柄+转接板 *1   6.亚克力车架板 *2  
+7.12V可充电电池组 *1   8.TB6612 *2   9.面包板及杜邦线若干
+
+主要引脚分配
+功能模块,引脚名称,CubeMX 配置,说明
+晶振 (HSE/LSE),PH0/PH1 & PC14/PC15,RCC 选择 Crystal/Ceramic,系统大小心脏
+代码烧录,PA13/PA14,SYS -> Serial Wire,ST-Link 调试下载口
+打印串口,PA9/PA10,USART1 (115200),连电脑串口助手看数据
+ps2转接板
+数据接收 (DI),PF0,GPIO_Input (Pull-up),接收手柄数据
+命令发送 (CMD),PF1,"GPIO_Output (Pull-up, High Speed)",告诉接收器准备
+片选信号 (CS),PF2,"GPIO_Output (Pull-up, High Speed)",激活接收器
+时钟信号 (CLK),PF3,"GPIO_Output (Pull-up, High Speed)",同步节拍
+电机pwm控制
+左前轮 M1 速度,PD12,TIM4_CH1 -> PWM Generation,接第一个 TB6612 的 PWMA
+右前轮 M2 速度,PD13,TIM4_CH2 -> PWM Generation,接第一个 TB6612 的 PWMB
+右后轮 M3 速度,PD14,TIM4_CH3 -> PWM Generation,接第二个 TB6612 的 PWMA
+左后轮 M4 速度,PD15,TIM4_CH4 -> PWM Generation,接第二个 TB6612 的 PWMB
+电机方向控制
+功能模块,引脚名称,CubeMX 配置,说明
+左前轮 M1 方向,"PE0, PE1",GPIO_Output,"接 AIN1, AIN2"
+右前轮 M2 方向,"PE2, PE3",GPIO_Output,"接 BIN1, BIN2"
+右后轮 M3 方向,"PE4, PE5",GPIO_Output,"接 AIN1, AIN2 (另一块板)"
+左后轮 M4 方向,"PE6, PE7",GPIO_Output,"接 BIN1, BIN2 (另一块板)"
+TB6612 强总开,PE8,GPIO_Output,接两块驱动板的 STBY（tb6612使能引脚） (需置高)
+电机编码器读取
+功能模块,引脚名称,CubeMX 配置,说明
+左前轮 M1 测速,"PA5, PB3",TIM2 -> Combined Channels 选 Encoder Mode,接 M1 编码器的 A相 和 B相
+右前轮 M2 测速,"PA6, PA7",TIM3 -> Combined Channels 选 Encoder Mode,接 M2 编码器的 A相 和 B相
+右后轮 M3 测速,"PA0, PA1",TIM5 -> Combined Channels 选 Encoder Mode,接 M3 编码器的 A相 和 B相
+左后轮 M4 测速,"PC6, PC7",TIM8 -> Combined Channels 选 Encoder Mode,接 M4 编码器的 A相 和 B相
+
+核心代码逻辑
+1.  Task_ps2(遥控数据采集)：周期性扫描 PS2 手柄状态，应用摇杆死区滤波，计算出目标系统的 Vx(X轴速度)、Vy(Y轴速度) 和 omega(自转角速度)，通过消息队列发送。
+2.  Task_motor(底盘运动控制)：阻塞接收控制指令，进行麦克纳姆轮运动学逆解，分配各轮目标速度，并以 20ms 为周期执行 PID 运算与 PWM 更新。
+
+开发日志：架构演进路线
+1.单核验证：从点亮单路 PWM 开始，验证硬件驱动与电机基础动作。
+2.闭环单调：加入 PS2 遥控器与单电机联动，打通 SPI 通信与基础的控制流。
+3.引脚统筹：全局规划 STM32F4 的定时器与 GPIO，避免 PWM、编码器定时器（TIM2/3/4/5/8）产生通道冲突。
+4.全向扩展：将 PS2 控制扩展至四轮，初步实现底盘的平移与旋转。
+5.面向对象重构：将原本零散的四个电机速度读取、PID 计算和 PWM 设置函数，统一封装成包含状态和参数的 Motor_t 结构体，大幅提升了代码的可读性与扩展性。
+
+核心问题与解决方案
+问题一：printf 堵塞导致 RTOS 任务超时
+现象：在调试期间加入 printf 打印电机速度和摇杆数据后，发现电机响应变卡顿，甚至出现控制失灵，RTOS 任务调度异常。
+根因分析：传统的 printf 重定向到串口（轮询/阻塞模式）是非常耗时的操作。在 115200 波特率下，打印一长串字符可能需要好几毫秒。在 FreeRTOS 中，如果高优先级任务长时间阻塞在串口发送上，会导致底层以 20ms 为周期的 Task_motor 无法及时获取 CPU 控制权，引发控制周期抖动。
+解决思路：在 Release 版本中移除或宏隔离了调试打印；若后续仍需高频打印，可以改用 串口 DMA 异步发送 配合缓冲区，彻底释放 CPU。
+
+问题二：麦克纳姆轮的力矩干涉（O型 vs X型）
+现象：早期按照“菱形”（O型，即四个轮子底部的辊子轴线指向底盘中心）安装麦轮，发现底盘在执行原地自转时非常费力，甚至无法正常旋转。
+根因分析：O型摆放时，四个轮子旋转产生的摩擦力矢量虽然能实现平移，但在做原地旋转动作时，其受力切线不通过底盘几何中心，会导致严重的力矩相互抵消（即轮子在地上互相较劲）。
+解决方案：重新拆装调整为 “X型”摆放（从底盘正上方看，辊子轴线呈 X 形向外发散）。此时底盘在进行差速旋转时，四个轮子的力矩完美汇聚构成纯旋转力偶，操控变得极其丝滑。
+
+问题三：CMSIS-RTOS 队列传递结构体失败
+现象：尝试使用 STM32CubeMX 自带封装的 osMessageQ 传递包含摇杆解析数据的结构体（如 CtrlCmd_t）时，数据无法正确送达或出现内存乱码。
+根因分析：CubeMX 默认生成的 CMSIS-RTOS v1 接口中，osMessagePut 等函数在设计时通常只能按值传递 uint32_t 类型的数据（或者结构体指针）。如果直接传递指针，而数据在发送端被覆盖，接收端就会读到错乱的数据（竞态条件）。
+解决方案：果断穿透 CMSIS 封装层，直接调用 FreeRTOS 原生的 queue.h API（xQueueCreate 和 xQueueOverwrite / xQueueReceive）。原生 API 支持在创建队列时指定元素大小（sizeof(CtrlCmd_t)），每次传递都是深拷贝（按值传递），彻底解决了结构体数据跨任务传输的安全性问题。
+
+使用方法
+1. 使用 STM32CubeMX 或直接在 Keil MDK / STM32CubeIDE 中打开工程。
+2. 按照上述引脚分配表连接电机驱动、编码器与 PS2 接收器，供电引脚需自行按模块需求连接。
+3. 编译并烧录至 STM32F4 开发板。
+4. 按下 PS2 手柄上的 "MODE" 键（红灯亮起开启模拟模式），即可通过左右摇杆控制底盘全向移动
+
